@@ -21,65 +21,7 @@ if not conn_str:
     raise ValueError("PROJECT_CONNECTION_STRING not found in .env or invalid.")
 
 # -------------------------
-# Decorator to trace function name
-# -------------------------
-def trace_function_name(func: Callable) -> Callable:
-    def wrapper(*args, **kwargs):
-        span = trace.get_current_span()
-        if span:
-            span.set_attribute("gen_ai.tool.function_name", func.__name__)
-        
-        # Debug print statements
-        print(f"Calling {func.__name__} with args: {args} and kwargs: {kwargs}")
-        
-        # Special handling for 'args' keyword which might contain the city name
-        if 'args' in kwargs and isinstance(kwargs['args'], str) and func.__name__ in ['fetch_weather', 'fetch_air_quality', 'get_city_coords']:
-            # Check if it looks like coordinates (contains a comma and numbers)
-            args_value = kwargs['args']
-            if ',' in args_value and any(char.isdigit() for char in args_value):
-                # Try to parse as lat,lon
-                try:
-                    parts = args_value.split(',')
-                    if len(parts) == 2:
-                        lat = float(parts[0].strip())
-                        lon = float(parts[1].strip())
-                        print(f"Parsed coordinates: lat={lat}, lon={lon}")
-                        clean_kwargs = {'lat': lat, 'lon': lon}
-                        result = func(**clean_kwargs)
-                        print(f"Function {func.__name__} returned: {result}")
-                        return result
-                except (ValueError, IndexError):
-                    print(f"Failed to parse {args_value} as coordinates")
-            
-            # If not coordinates or failed to parse, treat as city name
-            city_name = args_value
-            print(f"Found city name in 'args': {city_name}")
-            
-            # Clean kwargs for the function call
-            clean_kwargs = {'city': city_name}
-            
-            # Call the function with the extracted city name
-            result = func(**clean_kwargs)
-            print(f"Function {func.__name__} returned: {result}")
-            return result
-            
-        # Clean kwargs of any unexpected arguments
-        # Get the function's parameter names
-        import inspect
-        sig = inspect.signature(func)
-        valid_params = set(sig.parameters.keys())
-        
-        # Filter kwargs to only include valid parameters
-        filtered_kwargs = {k: v for k, v in kwargs.items() if k in valid_params}
-        print(f"Using filtered kwargs: {filtered_kwargs}")
-        
-        result = func(*args, **filtered_kwargs)
-        print(f"Function {func.__name__} returned: {result}")
-        return result
-    return wrapper
-
-# -------------------------
-# Example Function Definitions with Decorator
+# Example Function Definitions
 # -------------------------
 CITY_COORDS = {
     "London": {"lat": 51.5074, "lon": -0.1278},
@@ -87,63 +29,110 @@ CITY_COORDS = {
     "Tokyo": {"lat": 35.6895, "lon": 139.6917}
 }
 
-@trace_function_name
 def get_city_coords(city: str) -> str:
-    if city not in CITY_COORDS:
-        return json.dumps({"error": f"Coordinates for {city} not found"})
-    lat = CITY_COORDS[city]["lat"]
-    lon = CITY_COORDS[city]["lon"]
-    return json.dumps({"lat": lat, "lon": lon})
+    with trace.get_tracer(__name__).start_as_current_span("get_city_coords") as span:
+        span.set_attribute("function.name", "get_city_coords")
+        span.set_attribute("function.city", city)
+        print(f"[TRACE] get_city_coords called with city={city}")
+        
+        if city not in CITY_COORDS:
+            result = json.dumps({"error": f"Coordinates for {city} not found"})
+            span.set_attribute("function.result", result)
+            print(f"[TRACE] get_city_coords returned: {result}")
+            return result
+            
+        lat = CITY_COORDS[city]["lat"]
+        lon = CITY_COORDS[city]["lon"]
+        result = json.dumps({"lat": lat, "lon": lon})
+        span.set_attribute("function.result", result)
+        print(f"[TRACE] get_city_coords returned: {result}")
+        return result
 
-@trace_function_name
 def fetch_weather(city: str = None, lat: float = None, lon: float = None) -> str:
-    # If city is provided, get coordinates from it
-    if city and not (lat and lon):
-        if city not in CITY_COORDS:
-            return json.dumps({"error": f"City {city} not supported"})
-        lat = CITY_COORDS[city]["lat"]
-        lon = CITY_COORDS[city]["lon"]
-    
-    # If we don't have valid coordinates, return error
-    if not (lat and lon):
-        return json.dumps({"error": "Missing coordinates"})
+    with trace.get_tracer(__name__).start_as_current_span("fetch_weather") as span:
+        span.set_attribute("function.name", "fetch_weather")
+        span.set_attribute("function.city", str(city))
+        span.set_attribute("function.lat", str(lat))
+        span.set_attribute("function.lon", str(lon))
+        print(f"[TRACE] fetch_weather called with city={city}, lat={lat}, lon={lon}")
         
-    url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&hourly=temperature_2m&forecast_days=1"
-    try:
-        r = requests.get(url, timeout=10)
-        r.raise_for_status()
-        data = r.json()
-        temps = data.get("hourly", {}).get("temperature_2m", [])
-        temp = temps[0] if temps else None
-        return json.dumps({
-            "temperature": temp,
-            "units": data.get("hourly_units", {}).get("temperature_2m", "unknown")
-        })
-    except requests.RequestException as e:
-        return json.dumps({"error": str(e)})
+        if city and not (lat and lon):
+            if city not in CITY_COORDS:
+                result = json.dumps({"error": f"City {city} not supported"})
+                span.set_attribute("function.result", result)
+                print(f"[TRACE] fetch_weather returned: {result}")
+                return result
+            lat = CITY_COORDS[city]["lat"]
+            lon = CITY_COORDS[city]["lon"]
+        
+        if not (lat and lon):
+            result = json.dumps({"error": "Missing coordinates"})
+            span.set_attribute("function.result", result)
+            print(f"[TRACE] fetch_weather returned: {result}")
+            return result
+            
+        url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&hourly=temperature_2m&forecast_days=1"
+        try:
+            r = requests.get(url, timeout=10)
+            r.raise_for_status()
+            data = r.json()
+            temps = data.get("hourly", {}).get("temperature_2m", [])
+            temp = temps[0] if temps else None
+            result = json.dumps({
+                "temperature": temp,
+                "units": data.get("hourly_units", {}).get("temperature_2m", "unknown")
+            })
+            span.set_attribute("function.result", result)
+            print(f"[TRACE] fetch_weather returned: {result}")
+            return result
+        except requests.RequestException as e:
+            result = json.dumps({"error": str(e)})
+            span.set_attribute("function.result", result)
+            span.set_status(trace.StatusCode.ERROR)
+            span.record_exception(e)
+            print(f"[TRACE] fetch_weather returned error: {result}")
+            return result
 
-@trace_function_name
 def fetch_air_quality(city: str = None, lat: float = None, lon: float = None) -> str:
-    # If city is provided, get coordinates from it
-    if city and not (lat and lon):
-        if city not in CITY_COORDS:
-            return json.dumps({"error": f"City {city} not supported"})
-        lat = CITY_COORDS[city]["lat"]
-        lon = CITY_COORDS[city]["lon"]
-    
-    # If we don't have valid coordinates, return error
-    if not (lat and lon):
-        return json.dumps({"error": "Missing coordinates"})
+    with trace.get_tracer(__name__).start_as_current_span("fetch_air_quality") as span:
+        span.set_attribute("function.name", "fetch_air_quality")
+        span.set_attribute("function.city", str(city))
+        span.set_attribute("function.lat", str(lat))
+        span.set_attribute("function.lon", str(lon))
+        print(f"[TRACE] fetch_air_quality called with city={city}, lat={lat}, lon={lon}")
         
-    try:
-        air_quality_index = 42  # Placeholder value
-        return json.dumps({
-            "air_quality_index": air_quality_index,
-            "lat": lat,
-            "lon": lon
-        })
-    except Exception as e:
-        return json.dumps({"error": str(e)})
+        if city and not (lat and lon):
+            if city not in CITY_COORDS:
+                result = json.dumps({"error": f"City {city} not supported"})
+                span.set_attribute("function.result", result)
+                print(f"[TRACE] fetch_air_quality returned: {result}")
+                return result
+            lat = CITY_COORDS[city]["lat"]
+            lon = CITY_COORDS[city]["lon"]
+        
+        if not (lat and lon):
+            result = json.dumps({"error": "Missing coordinates"})
+            span.set_attribute("function.result", result)
+            print(f"[TRACE] fetch_air_quality returned: {result}")
+            return result
+            
+        try:
+            air_quality_index = 42  # Placeholder value
+            result = json.dumps({
+                "air_quality_index": air_quality_index,
+                "lat": lat,
+                "lon": lon
+            })
+            span.set_attribute("function.result", result)
+            print(f"[TRACE] fetch_air_quality returned: {result}")
+            return result
+        except Exception as e:
+            result = json.dumps({"error": str(e)})
+            span.set_attribute("function.result", result)
+            span.set_status(trace.StatusCode.ERROR)
+            span.record_exception(e)
+            print(f"[TRACE] fetch_air_quality returned error: {result}")
+            return result
 
 # -------------------------
 # Custom Span Processor for Additional Attributes
@@ -204,7 +193,7 @@ toolset = ToolSet()
 toolset.add(functions_tool)
 
 def run_agent_with_tracing():
-    with tracer.start_as_current_span(f"agent_run.{scenario}") as main_span:
+    with tracer.start_as_current_span("agent_run") as main_span:
         main_span.set_attribute("run.type", "weather_query")
         main_span.set_attribute("run.start_time", datetime.now().isoformat())
         
@@ -214,11 +203,8 @@ def run_agent_with_tracing():
                 agent = project_client.agents.create_agent(
                     model="gpt-4o-mini",
                     name="weather-agent",
-                    instructions="""You are a weather bot. When users ask about weather or air quality, follow these steps in order:
-                    1. First, use get_city_coords to get the coordinates for the city.
-                    2. Then, use fetch_weather to get the current temperature.
-                    3. Finally, use fetch_air_quality to get air quality information.
-                    Always provide both weather and air quality information for a complete response.
+                    instructions="""You are a weather bot. When users ask about weather or air quality,
+                    call required functions in required order and respond..
                     """,
                     toolset=toolset
                 )
