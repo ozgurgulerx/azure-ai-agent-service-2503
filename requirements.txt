@@ -3,8 +3,3 @@ semantic-kernel
 python-dotenv
 azure-ai-projects
 azure-identity
-opentelemetry-api 
-opentelemetry-sdk 
-opentelemetry-exporter-otlp
- azure-core-tracing-opentelemetry
-
