@@ -31,6 +31,37 @@ def trace_function_name(func: Callable) -> Callable:
         # Debug print statements
         print(f"Calling {func.__name__} with args: {args} and kwargs: {kwargs}")
         
+        # Special handling for 'args' keyword which might contain the city name
+        if 'args' in kwargs and isinstance(kwargs['args'], str) and func.__name__ in ['fetch_weather', 'fetch_air_quality', 'get_city_coords']:
+            # Check if it looks like coordinates (contains a comma and numbers)
+            args_value = kwargs['args']
+            if ',' in args_value and any(char.isdigit() for char in args_value):
+                # Try to parse as lat,lon
+                try:
+                    parts = args_value.split(',')
+                    if len(parts) == 2:
+                        lat = float(parts[0].strip())
+                        lon = float(parts[1].strip())
+                        print(f"Parsed coordinates: lat={lat}, lon={lon}")
+                        clean_kwargs = {'lat': lat, 'lon': lon}
+                        result = func(**clean_kwargs)
+                        print(f"Function {func.__name__} returned: {result}")
+                        return result
+                except (ValueError, IndexError):
+                    print(f"Failed to parse {args_value} as coordinates")
+            
+            # If not coordinates or failed to parse, treat as city name
+            city_name = args_value
+            print(f"Found city name in 'args': {city_name}")
+            
+            # Clean kwargs for the function call
+            clean_kwargs = {'city': city_name}
+            
+            # Call the function with the extracted city name
+            result = func(**clean_kwargs)
+            print(f"Function {func.__name__} returned: {result}")
+            return result
+            
         # Clean kwargs of any unexpected arguments
         # Get the function's parameter names
         import inspect
@@ -144,7 +175,30 @@ tracer = trace.get_tracer(__name__)
 # -------------------------
 # Register Function Tools and Create Agent
 # -------------------------
-functions_tool = FunctionTool([get_city_coords, fetch_weather, fetch_air_quality])  # Fix: Use list
+def get_city_coords_wrapper(city: str) -> str:
+    return get_city_coords(city=city)
+
+def fetch_weather_wrapper(city: str = None, lat: float = None, lon: float = None) -> str:
+    if city is not None:
+        return fetch_weather(city=city)
+    elif lat is not None and lon is not None:
+        return fetch_weather(lat=lat, lon=lon)
+    else:
+        return json.dumps({"error": "Missing required parameters"})
+
+def fetch_air_quality_wrapper(city: str = None, lat: float = None, lon: float = None) -> str:
+    if city is not None:
+        return fetch_air_quality(city=city)
+    elif lat is not None and lon is not None:
+        return fetch_air_quality(lat=lat, lon=lon)
+    else:
+        return json.dumps({"error": "Missing required parameters"})
+
+functions_tool = FunctionTool([
+    get_city_coords_wrapper,
+    fetch_weather_wrapper,
+    fetch_air_quality_wrapper
+])
 toolset = ToolSet()
 toolset.add(functions_tool)
 
@@ -157,10 +211,10 @@ def run_agent_with_tracing():
                 name="weather-agent",
                 instructions="""
 You are a weather bot. When asked about weather and air quality for a location:
-1. Call get_city_coords to get coordinates for the city.
-2. Use those coordinates to call fetch_weather and fetch_air_quality.
-3. Or, call fetch_weather and fetch_air_quality directly with the city name.
-4. Provide a nice summary of the weather and air quality information.
+1. First call get_city_coords_wrapper with the city name to get coordinates.
+2. Then call fetch_weather_wrapper with the city name to get weather information.
+3. Then call fetch_air_quality_wrapper with the city name to get air quality information.
+4. Provide a nice summary of the weather and air quality information, including temperature.
 """,
                 toolset=toolset
             )
@@ -172,7 +226,7 @@ You are a weather bot. When asked about weather and air quality for a location:
             message = project_client.agents.create_message(
                 thread_id=thread.id,
                 role="user",
-                content="What are the weather and air quality conditions in London?"
+                content="What are the current temperature and air quality conditions in London? Please provide both pieces of information."
             )
             print(f"Created message, ID: {message.id}")
 
