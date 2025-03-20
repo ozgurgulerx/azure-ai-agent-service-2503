@@ -28,6 +28,9 @@ def trace_function_name(func: Callable) -> Callable:
         if span:
             span.set_attribute("gen_ai.tool.function_name", func.__name__)
         
+        # Debug print statements
+        print(f"Calling {func.__name__} with args: {args} and kwargs: {kwargs}")
+        
         # Clean kwargs of any unexpected arguments
         # Get the function's parameter names
         import inspect
@@ -36,8 +39,11 @@ def trace_function_name(func: Callable) -> Callable:
         
         # Filter kwargs to only include valid parameters
         filtered_kwargs = {k: v for k, v in kwargs.items() if k in valid_params}
+        print(f"Using filtered kwargs: {filtered_kwargs}")
         
-        return func(*args, **filtered_kwargs)
+        result = func(*args, **filtered_kwargs)
+        print(f"Function {func.__name__} returned: {result}")
+        return result
     return wrapper
 
 # -------------------------
