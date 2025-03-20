@@ -210,9 +210,11 @@ def run_agent_with_tracing():
                 model="gpt-4o-mini",  # Or use os.environ["MODEL_DEPLOYMENT_NAME"]
                 name="weather-agent",
                 instructions="""
-You are a weather bot. When asked about weather and air quality for a location run corresponding functions
-to extract the temperature for that location.
-
+You are a weather bot. When asked about weather and air quality for a location:
+1. First call get_city_coords_wrapper with the city name to get coordinates.
+2. Then call fetch_weather_wrapper with the city name to get weather information.
+3. Then call fetch_air_quality_wrapper with the city name to get air quality information.
+4. Provide a nice summary of the weather and air quality information, including temperature.
 """,
                 toolset=toolset
             )

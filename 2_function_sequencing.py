@@ -10,6 +10,7 @@ from azure.identity import DefaultAzureCredential
 from opentelemetry import trace
 from opentelemetry.sdk.trace import SpanProcessor, ReadableSpan, Span, TracerProvider
 from typing import Callable
+from datetime import datetime
 
 # -------------------------
 # Environment Setup
@@ -203,53 +204,80 @@ toolset = ToolSet()
 toolset.add(functions_tool)
 
 def run_agent_with_tracing():
-    with tracer.start_as_current_span(scenario):
+    with tracer.start_as_current_span(f"agent_run.{scenario}") as main_span:
+        main_span.set_attribute("run.type", "weather_query")
+        main_span.set_attribute("run.start_time", datetime.now().isoformat())
+        
         with project_client:
             # Create an agent with instructions to use the three functions in sequence.
-            agent = project_client.agents.create_agent(
-                model="gpt-4o-mini",  # Or use os.environ["MODEL_DEPLOYMENT_NAME"]
-                name="weather-agent",
-                instructions="""
-You are a weather bot. When asked about weather and air quality for a location:
-1. First call get_city_coords_wrapper with the city name to get coordinates.
-2. Then call fetch_weather_wrapper with the city name to get weather information.
-3. Then call fetch_air_quality_wrapper with the city name to get air quality information.
-4. Provide a nice summary of the weather and air quality information, including temperature.
-""",
-                toolset=toolset
-            )
-            print(f"Created agent, ID: {agent.id}")
+            with tracer.start_as_current_span("agent.create") as span:
+                agent = project_client.agents.create_agent(
+                    model="gpt-4o-mini",
+                    name="weather-agent",
+                    instructions="""You are a weather bot. When users ask about weather or air quality, follow these steps in order:
+                    1. First, use get_city_coords to get the coordinates for the city.
+                    2. Then, use fetch_weather to get the current temperature.
+                    3. Finally, use fetch_air_quality to get air quality information.
+                    Always provide both weather and air quality information for a complete response.
+                    """,
+                    toolset=toolset
+                )
+                span.set_attribute("agent.id", agent.id)
+                print(f"Created agent, ID: {agent.id}")
 
-            thread = project_client.agents.create_thread()
-            print(f"Created thread, ID: {thread.id}")
+            # Start a conversation thread
+            with tracer.start_as_current_span("thread.create") as span:
+                thread = project_client.agents.create_thread()
+                span.set_attribute("thread.id", thread.id)
+                print(f"Created thread, ID: {thread.id}")
 
-            message = project_client.agents.create_message(
-                thread_id=thread.id,
-                role="user",
-                content="What are the current temperature and air quality conditions in London? Please provide both pieces of information."
-            )
-            print(f"Created message, ID: {message.id}")
+            # Send a user message
+            with tracer.start_as_current_span("message.create") as span:
+                message_content = "What are the current temperature and air quality conditions in London? Please provide both pieces of information."
+                span.set_attribute("message.content", message_content)
+                
+                message = project_client.agents.create_message(
+                    thread_id=thread.id,
+                    role="user",
+                    content=message_content
+                )
+                span.set_attribute("message.id", message.id)
+                print(f"Created message, ID: {message.id}")
 
+            # Process the agent run
             print("Processing run...")
-            run = project_client.agents.create_and_process_run(
-                thread_id=thread.id,
-                agent_id=agent.id
-            )
-            print(f"Run finished with status: {run.status}")
-            if run.status == "failed":
-                print(f"Run failed: {run.last_error}")
+            with tracer.start_as_current_span("run.process") as span:
+                run = project_client.agents.create_and_process_run(
+                    thread_id=thread.id,
+                    agent_id=agent.id
+                )
+                span.set_attribute("run.status", str(run.status))
+                print(f"Run finished with status: {run.status}")
+                if run.status == "failed":
+                    span.set_attribute("run.error", str(run.last_error))
+                    print(f"Run failed: {run.last_error}")
 
+            # Retrieve and display conversation messages
             print("\nRetrieving conversation:")
-            msgs = project_client.agents.list_messages(thread_id=thread.id)
-            for m in msgs.data:
-                role = "User" if m.role == "user" else "Assistant"
-                if m.content:
-                    text_content = [c.text.value for c in m.content if hasattr(c, 'text')]
-                    if text_content:
-                        print(f"{role}: {text_content[0]}")
+            with tracer.start_as_current_span("messages.retrieve") as span:
+                msgs = project_client.agents.list_messages(thread_id=thread.id)
+                span.set_attribute("messages.count", len(msgs.data))
+                
+                for m in msgs.data:
+                    role = "User" if m.role == "user" else "Assistant"
+                    if m.content:
+                        text_content = [c.text.value for c in m.content if hasattr(c, 'text')]
+                        if text_content:
+                            print(f"{role}: {text_content[0]}")
+                            if role == "Assistant":
+                                span.set_attribute("assistant.response", text_content[0])
 
-            project_client.agents.delete_agent(agent.id)
-            print("Deleted agent.")
+            # Cleanup
+            with tracer.start_as_current_span("agent.delete") as span:
+                project_client.agents.delete_agent(agent.id)
+                print("Deleted agent.")
+        
+        main_span.set_attribute("run.end_time", datetime.now().isoformat())
 
 if __name__ == "__main__":
     run_agent_with_tracing()
