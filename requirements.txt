@@ -1,7 +1,7 @@
-fastapi
-uvicorn 
 openai
-semantic-kernel==1.23.1
+semantic-kernel
 python-dotenv
+azure-ai-projects
+azure-identity
 
 
