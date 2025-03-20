@@ -1,0 +1,7 @@
+fastapi
+uvicorn 
+openai
+semantic-kernel==1.23.1
+python-dotenv
+
+
