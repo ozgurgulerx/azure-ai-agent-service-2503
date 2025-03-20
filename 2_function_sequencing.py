@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 import json
 import requests
 from dotenv import load_dotenv
@@ -8,7 +9,7 @@ from azure.ai.projects.models import FunctionTool, ToolSet
 from azure.identity import DefaultAzureCredential
 from opentelemetry import trace
 from opentelemetry.sdk.trace import SpanProcessor, ReadableSpan, Span, TracerProvider
-from typing import Dict, Any
+from typing import Callable
 
 # -------------------------
 # Environment Setup
@@ -19,7 +20,28 @@ if not conn_str:
     raise ValueError("PROJECT_CONNECTION_STRING not found in .env or invalid.")
 
 # -------------------------
-# Example Function Definitions
+# Decorator to trace function name
+# -------------------------
+def trace_function_name(func: Callable) -> Callable:
+    def wrapper(*args, **kwargs):
+        span = trace.get_current_span()
+        if span:
+            span.set_attribute("gen_ai.tool.function_name", func.__name__)
+        
+        # Clean kwargs of any unexpected arguments
+        # Get the function's parameter names
+        import inspect
+        sig = inspect.signature(func)
+        valid_params = set(sig.parameters.keys())
+        
+        # Filter kwargs to only include valid parameters
+        filtered_kwargs = {k: v for k, v in kwargs.items() if k in valid_params}
+        
+        return func(*args, **filtered_kwargs)
+    return wrapper
+
+# -------------------------
+# Example Function Definitions with Decorator
 # -------------------------
 CITY_COORDS = {
     "London": {"lat": 51.5074, "lon": -0.1278},
@@ -27,44 +49,63 @@ CITY_COORDS = {
     "Tokyo": {"lat": 35.6895, "lon": 139.6917}
 }
 
+@trace_function_name
 def get_city_coords(city: str) -> str:
-    """ Returns coordinates for a given city """
     if city not in CITY_COORDS:
         return json.dumps({"error": f"Coordinates for {city} not found"})
-    return json.dumps(CITY_COORDS[city])
+    lat = CITY_COORDS[city]["lat"]
+    lon = CITY_COORDS[city]["lon"]
+    return json.dumps({"lat": lat, "lon": lon})
 
-def fetch_weather(city: str) -> str:
-    """ Fetches weather information based on city name """
-    if city not in CITY_COORDS:
-        return json.dumps({"error": "City not supported"})
+@trace_function_name
+def fetch_weather(city: str = None, lat: float = None, lon: float = None) -> str:
+    # If city is provided, get coordinates from it
+    if city and not (lat and lon):
+        if city not in CITY_COORDS:
+            return json.dumps({"error": f"City {city} not supported"})
+        lat = CITY_COORDS[city]["lat"]
+        lon = CITY_COORDS[city]["lon"]
     
-    lat, lon = CITY_COORDS[city]["lat"], CITY_COORDS[city]["lon"]
+    # If we don't have valid coordinates, return error
+    if not (lat and lon):
+        return json.dumps({"error": "Missing coordinates"})
+        
     url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&hourly=temperature_2m&forecast_days=1"
-    
     try:
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        temp = data.get("hourly", {}).get("temperature_2m", [None])[0]
-        result = {
-            "city": city,
+        r = requests.get(url, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        temps = data.get("hourly", {}).get("temperature_2m", [])
+        temp = temps[0] if temps else None
+        return json.dumps({
             "temperature": temp,
             "units": data.get("hourly_units", {}).get("temperature_2m", "unknown")
-        }
-        return json.dumps(result)
+        })
     except requests.RequestException as e:
         return json.dumps({"error": str(e)})
 
-def fetch_air_quality(lat: float, lon: float) -> str:
-    """
-    Fetches air quality information using latitude and longitude
-    """
-    if lat is None or lon is None:
-        return json.dumps({"error": "Missing latitude or longitude"})
+@trace_function_name
+def fetch_air_quality(city: str = None, lat: float = None, lon: float = None) -> str:
+    # If city is provided, get coordinates from it
+    if city and not (lat and lon):
+        if city not in CITY_COORDS:
+            return json.dumps({"error": f"City {city} not supported"})
+        lat = CITY_COORDS[city]["lat"]
+        lon = CITY_COORDS[city]["lon"]
     
-    # In a real implementation, you would call an actual API
-    # This is a mock response for demonstration
-    return json.dumps({"air_quality_index": 42, "lat": lat, "lon": lon})
+    # If we don't have valid coordinates, return error
+    if not (lat and lon):
+        return json.dumps({"error": "Missing coordinates"})
+        
+    try:
+        air_quality_index = 42  # Placeholder value
+        return json.dumps({
+            "air_quality_index": air_quality_index,
+            "lat": lat,
+            "lon": lon
+        })
+    except Exception as e:
+        return json.dumps({"error": str(e)})
 
 # -------------------------
 # Custom Span Processor for Additional Attributes
@@ -73,6 +114,8 @@ class CustomAttributeSpanProcessor(SpanProcessor):
     def on_start(self, span: Span, parent_context=None):
         if span:
             span.set_attribute("trace_sample.sessionid", "123")
+            if span.name == "create_message":
+                span.set_attribute("trace_sample.message.context", "abc")
     def on_end(self, span: ReadableSpan):
         pass
 
@@ -83,44 +126,43 @@ provider = TracerProvider()
 trace.set_tracer_provider(provider)
 provider.add_span_processor(CustomAttributeSpanProcessor())
 
-# Initialize AI Project Client
 project_client = AIProjectClient.from_connection_string(
     conn_str=conn_str,
     credential=DefaultAzureCredential()
 )
 print("Tracing enabled, ensure OpenTelemetry is configured correctly.")
 
+scenario = os.path.basename(__file__)
 tracer = trace.get_tracer(__name__)
 
 # -------------------------
 # Register Function Tools and Create Agent
 # -------------------------
-functions_tool = FunctionTool([
-    get_city_coords,
-    fetch_weather,
-    fetch_air_quality
-])
-
+functions_tool = FunctionTool([get_city_coords, fetch_weather, fetch_air_quality])  # Fix: Use list
 toolset = ToolSet()
 toolset.add(functions_tool)
 
 def run_agent_with_tracing():
-    with tracer.start_as_current_span("weather_bot_run"):
+    with tracer.start_as_current_span(scenario):
         with project_client:
-            # Create an agent
+            # Create an agent with instructions to use the three functions in sequence.
             agent = project_client.agents.create_agent(
-                model="gpt-4o-mini",
+                model="gpt-4o-mini",  # Or use os.environ["MODEL_DEPLOYMENT_NAME"]
                 name="weather-agent",
-                instructions="You are a weather bot. Use your tools to answer weather and air quality queries.",
+                instructions="""
+You are a weather bot. When asked about weather and air quality for a location:
+1. Call get_city_coords to get coordinates for the city.
+2. Use those coordinates to call fetch_weather and fetch_air_quality.
+3. Or, call fetch_weather and fetch_air_quality directly with the city name.
+4. Provide a nice summary of the weather and air quality information.
+""",
                 toolset=toolset
             )
             print(f"Created agent, ID: {agent.id}")
 
-            # Start a conversation thread
             thread = project_client.agents.create_thread()
             print(f"Created thread, ID: {thread.id}")
 
-            # Send a user message
             message = project_client.agents.create_message(
                 thread_id=thread.id,
                 role="user",
@@ -128,7 +170,6 @@ def run_agent_with_tracing():
             )
             print(f"Created message, ID: {message.id}")
 
-            # Process the agent run
             print("Processing run...")
             run = project_client.agents.create_and_process_run(
                 thread_id=thread.id,
@@ -138,7 +179,6 @@ def run_agent_with_tracing():
             if run.status == "failed":
                 print(f"Run failed: {run.last_error}")
 
-            # Retrieve and display conversation messages
             print("\nRetrieving conversation:")
             msgs = project_client.agents.list_messages(thread_id=thread.id)
             for m in msgs.data:
@@ -148,7 +188,6 @@ def run_agent_with_tracing():
                     if text_content:
                         print(f"{role}: {text_content[0]}")
 
-            # Cleanup
             project_client.agents.delete_agent(agent.id)
             print("Deleted agent.")
 
